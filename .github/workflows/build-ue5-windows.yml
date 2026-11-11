@@ -1,0 +1,85 @@
+name: Build CapiRun (UE 5.4 Win64)
+
+# Experimental: baixa a engine instalada da Epic via legendary a cada execucao.
+# Requer o secret LEGENDARY_USER_JSON (conteudo de ~/.config/legendary/user.json apos `legendary auth`).
+
+on:
+  workflow_dispatch:
+    inputs:
+      ue_app:
+        description: "Nome do app da engine na biblioteca Epic"
+        default: "UE_5.4"
+      install_tags:
+        description: "Install tags extras (separadas por espaco); vazio = so arquivos base"
+        default: ""
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 350
+    env:
+      UE_BASE: C:/UE
+      UE_APP: ${{ inputs.ue_app }}
+      INSTALL_TAGS: ${{ inputs.install_tags }}
+    steps:
+      - name: 1. Disco disponivel
+        shell: pwsh
+        run: Get-PSDrive -PSProvider FileSystem | Format-Table Name,Used,Free
+
+      - name: 2. Checkout
+        uses: actions/checkout@v4
+
+      - name: 3. Instalar legendary e restaurar login Epic
+        shell: bash
+        env:
+          LEGENDARY_USER_JSON: ${{ secrets.LEGENDARY_USER_JSON }}
+        run: |
+          if [ -z "$LEGENDARY_USER_JSON" ]; then echo "::error::Secret LEGENDARY_USER_JSON ausente"; exit 1; fi
+          python -m pip install --quiet legendary-gl
+          mkdir -p "$HOME/.config/legendary"
+          printf '%s' "$LEGENDARY_USER_JSON" > "$HOME/.config/legendary/user.json"
+          legendary status
+
+      - name: 4. Localizar a engine na biblioteca
+        shell: bash
+        run: |
+          legendary list --include-ue 2>&1 | grep -i -E "UE_[0-9]" || true
+          legendary info "$UE_APP" 2>&1 | grep -i -E "install tags|size|version|error" || true
+
+      - name: 5. Baixar a engine
+        shell: bash
+        run: |
+          TAGS=(--install-tag "")
+          for t in $INSTALL_TAGS; do TAGS+=(--install-tag "$t"); done
+          legendary install "$UE_APP" --base-path "$UE_BASE" --platform Windows "${TAGS[@]}" -y
+          df -h /c
+
+      - name: 6. Instalar MSVC 14.38 (toolchain preferido da UE 5.4)
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          $p = Start-Process -Wait -PassThru -FilePath "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe" -ArgumentList @(
+            "modify", "--installPath", "`"$vs`"",
+            "--add", "Microsoft.VisualStudio.Component.VC.14.38.17.8.x86.x64",
+            "--quiet", "--norestart", "--nocache")
+          Write-Host "vs_installer exit code: $($p.ExitCode)"
+          Get-ChildItem "$vs\VC\Tools\MSVC" | Select-Object Name
+
+      - name: 7. BuildCookRun Win64
+        shell: pwsh
+        run: |
+          $uat = Get-ChildItem -Path $env:UE_BASE -Recurse -Depth 5 -Filter RunUAT.bat -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $uat) { Write-Host "::error::RunUAT.bat nao encontrado em $env:UE_BASE"; Get-ChildItem $env:UE_BASE -Depth 1; exit 1 }
+          & $uat.FullName BuildCookRun `
+            -project="$env:GITHUB_WORKSPACE\CapiRun.uproject" -noP4 -platform=Win64 `
+            -clientconfig=Development -cook -allmaps -build -stage -pak -archive `
+            -archivedirectory="$env:GITHUB_WORKSPACE\BuildOutput" `
+            -nullrhi -unattended -utf8output
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: 8. Salvar jogo Windows (Artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: CapiRun-Windows-Build
+          path: BuildOutput
+          if-no-files-found: error
