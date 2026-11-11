@@ -1,45 +1,49 @@
 name: Build CapiRun (UE 5.4 Linux)
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
-
-env:
-  UE_IMAGE: ghcr.io/epicgames/unreal-engine:dev-slim-5.4.4
+  push:
+    branches: [ "main" ]
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 300
+
     steps:
-      - name: Free disk space
+      - name: 1. Liberar espaco em disco (35 GB livres)
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
-          docker image prune -af
-          df -h /
-      - uses: actions/checkout@v4
-      - name: Login to GHCR
-        env:
-          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
-        run: |
-          if [ -z "$GHCR_TOKEN" ]; then echo "::error::Secret GHCR_TOKEN ausente no repositorio"; exit 1; fi
-          echo "$GHCR_TOKEN" | docker login ghcr.io -u "${{ github.repository_owner }}" --password-stdin
-      - name: Pull engine image
-        run: docker pull "$UE_IMAGE"
-      - name: BuildCookRun
-        run: |
-          sudo chown -R 1000:1000 "${GITHUB_WORKSPACE}"
-          docker run --rm -e GITHUB_WORKSPACE -v "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" "$UE_IMAGE" bash -c '
-            /home/ue4/UnrealEngine/Engine/Build/BatchFiles/RunUAT.sh BuildCookRun \
-              -project="${GITHUB_WORKSPACE}/CapiRun.uproject" -noP4 -platform=Linux \
-              -clientconfig=Development -cook -allmaps -build -stage -pak -archive \
-              -archivedirectory="${GITHUB_WORKSPACE}/BuildOutput" \
-              -nullrhi -unattended -utf8output'
-      - name: Restore workspace ownership
-        if: always()
-        run: sudo chown -R "$(id -u):$(id -g)" "${GITHUB_WORKSPACE}"
-      - uses: actions/upload-artifact@v4
+          df -h
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          sudo docker system prune -af
+          df -h
+
+      - name: 2. Baixar codigo do projeto CapiRun
+        uses: actions/checkout@v4
+
+      - name: 3. Login no Registro da Epic Games (GHCR)
+        uses: docker/login-action@v3
         with:
-          name: CapiRun-Linux
-          path: BuildOutput
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_TOKEN }}
+
+      - name: 4. Compilar e Empacotar no Container UE 5.4
+        run: |
+          chmod -R 777 "${{ github.workspace }}"
+          docker run --rm \
+            -v "${{ github.workspace }}:/project" \
+            -w /project \
+            ghcr.io/epicgames/unreal-engine:dev-slim-5.4.4 \
+            /home/ue4/UnrealEngine/Engine/Build/BatchFiles/RunUAT.sh BuildCookRun \
+              -project="/project/CapiRun.uproject" \
+              -noP4 -platform=Linux -clientconfig=Development \
+              -cook -allmaps -build -stage -pak -archive \
+              -archivedirectory="/project/BuildOutput" \
+              -nullrhi -unattended -utf8output
+
+      - name: 5. Salvar Jogo Compilado (Artifact)
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: CapiRun-Linux-Build
+          path: ${{ github.workspace }}/BuildOutput
